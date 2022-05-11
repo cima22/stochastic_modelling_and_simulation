@@ -4,3 +4,4 @@ Repository that contains several notebooks written in Python about the course "S
 - Simulation of Discrete Time Markov Chains
 - Continuous Time Markov Chains - CTMT
 - Population Continuous Time Markov Chains - PCTMC
+- Stochastic approximation of PCTMC
