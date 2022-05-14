@@ -87,7 +87,7 @@ class Transition:
         self.update = np.reshape(self.update, (1,variables.dimension))
 
 
-# In[5]:
+# In[4]:
 
 
 class Model:
@@ -105,6 +105,7 @@ class Model:
         self.system_size_reference = None
         self.system_size_name = ''
         self.variables_names = []
+        self.parameters_names = []
 
     def set_system_size(self, name, value):
         self.add_parameter(name, value)
@@ -124,6 +125,7 @@ class Model:
         if name in self.names2sym:
             raise ModelError("Name " + name + " already defined!")
         par = self.parameters.add(name, value)
+        self.parameters_names.append(name) # Added by me
         self.names2sym[name] = par
 
     # Changes the initial value of a variable
@@ -140,6 +142,9 @@ class Model:
 
     def get_parameter_value(self, name):
         return self.parameters.get_value(name)
+    
+    def get_variable_value(self, name): # Added by me
+        return self.variables.get_value(name)
 
     # Adds a transition to the model
     def add_transition(self, update, rate):
@@ -165,24 +170,20 @@ class Model:
     def __generate_vector_field(self):
         self._vector_field_sympy = np.zeros(self.transitions[0].update.shape, dtype=object)
 
-        '''
-        
-        CODE HERE: fluid equation
-        
-        '''
-            
+        for trans in self.transitions:
+            self._vector_field_sympy += trans.update * trans.rate
+
         self._vector_field_sympy = sp.simplify(self._vector_field_sympy)
 
 
     #generates the diffusion term
     def __generate_diffusion(self):
-        self._diffusion_sympy = 0
+        n = self.variables.dimension
+        self._diffusion_sympy = np.zeros((n, n), dtype=object)
+        for trans in self.transitions:
+            self._diffusion_sympy += np.matmul(trans.update.T,trans.update) * trans.rate
         
-        '''
-        
-        CODE HERE: diffusion term
-        
-        '''
+        self._diffusion_sympy = sp.simplify(self._diffusion_sympy)
     
     # computes symbolically the jacobian of the vector field
     def __generate_jacobian(self):
@@ -190,12 +191,12 @@ class Model:
         f = self._vector_field_sympy
         x = self.variables.reference
         J = np.zeros((n, n), dtype=object)
+                
+        for trans in self.transitions:
+            grad_sympy = np.array([sp.diff(trans.rate, var) for var in x], dtype=object)
+            grad_sympy.shape = trans.update.shape
 
-        '''
-        
-        CODE HERE: javobian (sympy.diff)
-        
-        '''
+            J += np.matmul(trans.update.T,grad_sympy)
             
         self._jacobian_sympy = J
 
@@ -227,7 +228,7 @@ class Model:
         return np.asarray(r)
 
 
-# In[6]:
+# In[5]:
 
 
 class Simulator:
@@ -249,12 +250,9 @@ class Simulator:
     # computes the full vector field for the linear noise ODE
     def _linear_noise_ODE(self, z, t):
         x_t, c_t = self._unpack(z)
-
-        '''
         
-        CODE HERE: linear noise eq
-        
-        '''
+        dx_dt, D, J = self.model.evaluate_all_vector_fields(x_t)
+        dc_dt = np.matmul(J,c_t) + np.matmul(c_t,J.T) + D
             
         dz = self._pack(dx_dt, dc_dt)
         return dz
@@ -262,11 +260,7 @@ class Simulator:
     # computes the vector field for the classic mean field
     def _mean_field_ODE(self, x, t):
         
-        '''
-        
-        CODE HERE: mean field eq
-        
-        '''
+        dx = self.model.evaluate_MF_vector_field(x)
         
         return dx.flatten()
 
@@ -294,6 +288,7 @@ class Simulator:
         :param trans_number: transitions' number
         :return: the variables computed along the trajectory
         """
+        
         # tracks simulation time and state
         time = 0
         state = self.x0
@@ -306,15 +301,23 @@ class Simulator:
         trans_code = range(trans_number)
         while time < final_time:
             # compute rates and total rate
+            total_rate = 0
+            rates = self.model.evaluate_rates(state)
+            total_rate = sum(rates)
             
             # sanity check, to avoid negative numbers close to zero
+            if total_rate > 0:
+                
+                probs = rates / total_rate
+                delta_t = np.random.exponential((1. / total_rate))
+                time = delta_t + time
             
-            
-            # COMPLETE HERE
-            
-            
-            # check if total rate is non zero.
-   
+                cur_trans = np.random.choice(a=trans_code, p=probs)
+                state = (state + self.model.transitions[cur_trans].update).flatten()
+
+            else:
+                time = final_time
+                
             # store values in the output array
             while print_index < len(time_stamp) and time_stamp[print_index] <= time:
                 x[print_index, :] = state
@@ -364,11 +367,7 @@ class Simulator:
         """
         t = self._generate_time_stamp(final_time, points)
         
-        '''
-        
-        CODE HERE: mean field solution
-        
-        '''
+        x = odeint(self._mean_field_ODE, self.x0, t)
 
         t = np.reshape(t, (len(t), 1))
         trajectory = Trajectory(t, x, "Mean Field", self.model.variables_names)
@@ -376,7 +375,7 @@ class Simulator:
 
     def LN_simulation(self, final_time, points=1000):
         """
-        Numerivally integrates the linear noise equations
+        Numerically integrates the linear noise equations
 
         :param final_time: final simulation time
         :param points: number of points to be saved
@@ -384,17 +383,26 @@ class Simulator:
         """
         n = self.model.variables.dimension
         t = self._generate_time_stamp(final_time, points)
-
-        '''
         
-        CODE HERE: linear noise solution
+        c_0 = np.zeros(n*n)
+        s_0 = np.concatenate((self.x0.flatten(), c_0))
         
-        '''
+        s = odeint(self._linear_noise_ODE, s_0, t)
+
+        x_t = np.zeros((len(t),n))
+        c_t = np.zeros((len(t),n,n))
         
-        return 
+        for i in range(len(t)):
+            x_t[i], c_t[i] = self._unpack(s[i])
+            x_t[i] = np.random.multivariate_normal(x_t[i], c_t[i] / sum(x_t[i])) # Adding the noise
+                
+        t = np.reshape(t, (len(t), 1))
+        trajectory = Trajectory(t, x_t, "Linear Noise", self.model.variables_names)
+        
+        return trajectory
 
 
-# In[7]:
+# In[6]:
 
 
 class Trajectory:
@@ -449,10 +457,4 @@ class Trajectory:
         plt.title(self.description + " vs " + trajectory.description)
         plt.xlabel('Time')
         plt.show()
-
-
-# In[ ]:
-
-
-
 
