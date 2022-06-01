@@ -5,3 +5,4 @@ Repository that contains several notebooks written in Python about the course "S
 - Continuous Time Markov Chains - CTMT
 - Population Continuous Time Markov Chains - PCTMC
 - Stochastic approximation of PCTMC
+- Stochastic Differential Equations
